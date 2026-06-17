@@ -1,0 +1,26 @@
+{
+  "name": "homeexchange-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for HomeExchange — browse properties, manage calendar, send messages",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "homeexchange-mcp": "./bin/homeexchange-mcp"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

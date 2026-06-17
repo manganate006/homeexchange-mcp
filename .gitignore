@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+*.tsbuildinfo
+
+# Config locale avec tokens (ne jamais committer)
+.mcp.json
+
+# Données privées (cookies, APK, fichiers de session)
+_data/
+
+# Instructions internes AI (non pertinentes pour le public)
+CLAUDE.md
