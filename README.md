@@ -45,7 +45,7 @@ Browse properties, manage conversations, update your calendar, handle favorites 
 
 ```bash
 # 1. Clone and build
-git clone https://github.com/manganate006/homeexchange-mcp
+git clone https://github.com/your-username/homeexchange-mcp
 cd homeexchange-mcp
 npm install && npm run build
 
@@ -126,7 +126,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 |----------|----------|---------|-------------|
 | `HE_ACCESS_TOKEN` | No* | — | JWT bearer token (`oidc_access_token` cookie) |
 | `HE_REFRESH_TOKEN` | No | — | Refresh token for session renewal |
-| `HE_COOKIES` | No* | — | Raw cookie string from browser (include PHPSESSID for auto-renewal) |
+| `HE_COOKIES` | No* | — | Raw `document.cookie` string from browser |
 | `HE_REQUEST_DELAY` | No | `1500` | Delay between API requests (ms) |
 | `HE_WEB_VERSION` | No | `19.7.2` | HomeExchange web version header |
 
@@ -169,7 +169,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | `he_get_conversations` | `filter?`, `first?`, `after?` | Conversations list with pagination (`ALL` / `UNREAD`) |
 | `he_get_conversation` | `conversationId` | Detailed conversation info (participants, exchanges) |
 | `he_get_conversation_stats` | — | Stats: unread count, total count |
-| `he_get_messages` | `conversationId`, `limit?`, `offset?` | Messages from a conversation (paginated) |
+| `he_get_messages` | `conversationId` | All messages from a conversation |
 | `he_translate_message` | `messageId`, `targetLanguage` | Translate a single message (e.g. `fr`, `en`, `es`) |
 | `he_translate_messages_batch` | `messageIds[]`, `targetLanguage` | Translate multiple messages at once |
 | `he_search_conversations` | `query` | Search conversations by keyword |
@@ -186,7 +186,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `he_search_homes` | `filters`, `offset?`, `limit?`, `min_response_rate?` | Search properties (location bounds, dates, bedrooms, amenities…) |
+| `he_search_homes` | `filters`, `offset?`, `limit?` | Search properties (location bounds, dates, bedrooms, amenities…) |
 | `he_get_saved_searches` | — | All saved searches |
 | `he_get_saved_search` | `searchId` | Details of a specific saved search |
 | `he_get_last_searches` | — | Recent search history |
@@ -285,13 +285,12 @@ Check my authentication status
   "guests_nb": 4,
   "home": {
     "size": { "bedrooms": 2 },
-    "amenities": ["swimming-pool"],
-    "surrounding": ["seaside"]
+    "amenities": ["swimming_pool"],
+    "type": [1, 2]
   },
   "calendar": {
     "date_ranges": [{ "from": "2026-08-05", "to": "2026-08-19" }]
-  },
-  "filters": ["response-rate-above-threshold"]
+  }
 }
 ```
 
@@ -304,7 +303,7 @@ src/
 ├── index.ts    — Entry point, StdioServerTransport, env validation
 ├── server.ts   — 47 MCP tool definitions + request dispatch
 ├── api.ts      — HTTP client (BFF + Main API, rate limiting, retries)
-├── auth.ts     — Token management, browser cookie parsing, disk cache, auto-refresh
+├── auth.ts     — Token management, browser cookie parsing, disk cache
 └── types.ts    — TypeScript interfaces
 ```
 
@@ -316,7 +315,7 @@ src/
 
 ## ⚠️ Limitations
 
-- **No auto-login**: token must be manually extracted from the browser every ~24h (or use `HE_COOKIES` with PHPSESSID for auto-renewal)
+- **No auto-login**: token must be manually extracted from the browser every ~24h
 - **No image upload**: multipart upload for property/profile photos not yet implemented
 - **No property creation**: `POST /v1/homes` not yet exposed
 - Rate limiting: default 1500ms between requests (configurable via `HE_REQUEST_DELAY`)
@@ -386,7 +385,7 @@ Parcourez des propriétés, gérez vos conversations, mettez à jour votre calen
 
 ```bash
 # 1. Cloner et compiler
-git clone https://github.com/manganate006/homeexchange-mcp
+git clone https://github.com/your-username/homeexchange-mcp
 cd homeexchange-mcp
 npm install && npm run build
 
@@ -467,7 +466,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 |----------|--------|--------|-------------|
 | `HE_ACCESS_TOKEN` | Non* | — | Token JWT Bearer (cookie `oidc_access_token`) |
 | `HE_REFRESH_TOKEN` | Non | — | Token de refresh pour renouveler la session |
-| `HE_COOKIES` | Non* | — | Chaîne complète des cookies du navigateur (inclure PHPSESSID pour le renouvellement auto) |
+| `HE_COOKIES` | Non* | — | Chaîne `document.cookie` brute du navigateur |
 | `HE_REQUEST_DELAY` | Non | `1500` | Délai entre les requêtes API (ms) |
 | `HE_WEB_VERSION` | Non | `19.7.2` | Header de version web HomeExchange |
 
@@ -510,7 +509,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | `he_get_conversations` | `filter?`, `first?`, `after?` | Liste des conversations avec pagination (`ALL` / `UNREAD`) |
 | `he_get_conversation` | `conversationId` | Détails d'une conversation (participants, échanges) |
 | `he_get_conversation_stats` | — | Statistiques : non lus, total |
-| `he_get_messages` | `conversationId`, `limit?`, `offset?` | Messages d'une conversation (paginé) |
+| `he_get_messages` | `conversationId` | Tous les messages d'une conversation |
 | `he_translate_message` | `messageId`, `targetLanguage` | Traduire un message (ex. `fr`, `en`, `es`) |
 | `he_translate_messages_batch` | `messageIds[]`, `targetLanguage` | Traduire plusieurs messages en une fois |
 | `he_search_conversations` | `query` | Rechercher dans les conversations par mot-clé |
@@ -527,7 +526,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
-| `he_search_homes` | `filters`, `offset?`, `limit?`, `min_response_rate?` | Recherche de propriétés (zone, dates, chambres, équipements…) |
+| `he_search_homes` | `filters`, `offset?`, `limit?` | Recherche de propriétés (zone, dates, chambres, équipements…) |
 | `he_get_saved_searches` | — | Toutes les recherches sauvegardées |
 | `he_get_saved_search` | `searchId` | Détails d'une recherche sauvegardée |
 | `he_get_last_searches` | — | Historique des dernières recherches |
@@ -626,13 +625,12 @@ Vérifie mon statut d'authentification
   "guests_nb": 4,
   "home": {
     "size": { "bedrooms": 2 },
-    "amenities": ["swimming-pool"],
-    "surrounding": ["seaside"]
+    "amenities": ["swimming_pool"],
+    "type": [1, 2]
   },
   "calendar": {
     "date_ranges": [{ "from": "2026-08-05", "to": "2026-08-19" }]
-  },
-  "filters": ["response-rate-above-threshold"]
+  }
 }
 ```
 
@@ -645,7 +643,7 @@ src/
 ├── index.ts    — Point d'entrée, StdioServerTransport, validation des env vars
 ├── server.ts   — Définition des 47 outils MCP + dispatch des requêtes
 ├── api.ts      — Client HTTP (BFF + API principale, rate limiting, retries)
-├── auth.ts     — Gestion des tokens, parsing des cookies navigateur, cache disque, auto-refresh
+├── auth.ts     — Gestion des tokens, parsing des cookies navigateur, cache disque
 └── types.ts    — Interfaces TypeScript
 ```
 
@@ -657,7 +655,7 @@ src/
 
 ## ⚠️ Limitations
 
-- **Pas de connexion automatique** : le token doit être extrait manuellement du navigateur toutes les ~24h (ou utiliser `HE_COOKIES` avec PHPSESSID pour le renouvellement auto)
+- **Pas de connexion automatique** : le token doit être extrait manuellement du navigateur toutes les ~24h
 - **Pas d'upload d'images** : l'upload multipart pour les photos n'est pas encore implémenté
 - **Pas de création de propriété** : l'endpoint `POST /v1/homes` n'est pas encore exposé
 - Rate limiting : 1500ms entre les requêtes par défaut (configurable via `HE_REQUEST_DELAY`)

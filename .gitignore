@@ -11,3 +11,5 @@ _data/
 
 # Instructions internes AI (non pertinentes pour le public)
 CLAUDE.md
+BRIEF-*.md
+PROMPT-*.md
