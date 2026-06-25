@@ -186,23 +186,64 @@ export class HomeExchangeApi {
   }
 
   /**
-   * Resolve which of my homes is attached to a conversation's exchange.
-   * `change-to-reciprocal/{homeId}` only succeeds when {homeId} is the home
-   * already paired on my side of the conversation. Returns the attached home ID,
-   * or null when no home of mine has a leg yet (pure GuestPoints conversation).
+   * Check the exchange state for a conversation: which of my homes is attached
+   * and what exchange type (1=reciprocal, 2=guestpoints) is active.
+   * Tries multiple JSON paths since the v3 API structure can vary.
    */
-  private async resolveAttachedHome(conversationId: number): Promise<number | null> {
+  private async checkExchangeState(
+    conversationId: number
+  ): Promise<{ homeId: number | null; type: number | null }> {
     const myIds = await this.getMyHomeIds();
     const conv = (await this.getConversation(conversationId)) as Record<string, unknown>;
-    const exchanges =
-      (((conv?.data as Record<string, unknown>)?.conversation as Record<string, unknown>)
-        ?.exchanges as unknown[]) ?? [];
+    // Try multiple paths — v3 may return data.conversation.exchanges or conversation.exchanges
+    const convData =
+      ((conv as any)?.data?.conversation) ??
+      (conv as any)?.conversation ??
+      conv;
+    const exchanges: unknown[] = (convData as any)?.exchanges ?? [];
+
+    console.error(`[api] checkExchangeState: conv ${conversationId}, ${exchanges.length} exchange(s), myIds=${JSON.stringify(myIds)}`);
+
+    let matchedHomeId: number | null = null;
+    let bestType: number | null = null;
+
     for (const ex of exchanges) {
-      const home = (ex as Record<string, unknown>)?.home as Record<string, unknown> | undefined;
-      const id = home?.id;
-      if (typeof id === "number" && myIds.includes(id)) return id;
+      const exObj = ex as Record<string, unknown>;
+      const rawType = exObj?.type ?? exObj?.exchange_type;
+      const exType = typeof rawType === "number" ? rawType : null;
+
+      // Try home.id (object), home as number (flat), home_id, homeId
+      const home = exObj?.home;
+      const homeId: number | null =
+        (typeof home === "object" && home !== null ? (home as any).id : null) ??
+        (typeof home === "number" ? home : null) ??
+        (typeof exObj?.home_id === "number" ? (exObj.home_id as number) : null) ??
+        (typeof exObj?.homeId === "number" ? (exObj.homeId as number) : null) ??
+        null;
+
+      // Debug: log each exchange leg
+      console.error(`[api]   ex ${exObj?.id ?? "?"}: type=${exType}, homeId=${homeId}, raw home=${typeof home === "object" ? JSON.stringify(home) : home}`);
+
+      if (typeof homeId === "number" && myIds.includes(homeId)) {
+        matchedHomeId = homeId;
+        bestType = exType;
+        break; // exact match — use this
+      }
+
+      // Track the type even when home doesn't match (v3 API may not include home in exchanges)
+      if (exType !== null) bestType = exType;
     }
-    return null;
+
+    return { homeId: matchedHomeId, type: bestType };
+  }
+
+  /**
+   * Resolve which of my homes is attached to a conversation's exchange.
+   * Wrapper around checkExchangeState for backward compat.
+   */
+  private async resolveAttachedHome(conversationId: number): Promise<number | null> {
+    const state = await this.checkExchangeState(conversationId);
+    return state.homeId;
   }
 
   // ─── Read (Exchanges) ────────────────────────────────────────────────────
@@ -458,13 +499,14 @@ export class HomeExchangeApi {
 
   // ─── Write (Batch) ─────────────────────────────────────────────────────
 
-  /** Batch archive conversations. */
+  /** Batch archive conversations. May return 204 No Content — we wrap with a confirmation. */
   async batchArchiveConversations(ids: number[]): Promise<unknown> {
-    return this.patch(
+    await this.patch(
       `${API_BASE}/v1/conversations/batch/archive`,
       "api",
       { ids }
     );
+    return { success: true, conversationIds: ids, action: "archived", count: ids.length };
   }
 
   /** Batch translate messages. */
@@ -545,8 +587,9 @@ export class HomeExchangeApi {
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       if (exchangeType === 1 && errMsg.includes("400") && errMsg.toLowerCase().includes("calendar")) {
-        console.error("[api] sendFirstMessage: calendar conflict for reciprocal, falling back to GuestPoints");
+        console.error(`[api] sendFirstMessage: calendar conflict for reciprocal, falling back to GuestPoints. Error: ${errMsg}`);
         body.exchange_type = 2;
+        // keep body.sender_home = senderHomeId so HE creates a GP exchange with the correct home attached
         result = await this.post<Record<string, unknown>>(`${API_BASE}/v1/messages`, "api", body);
         fellBackToGP = true;
       } else {
@@ -558,6 +601,8 @@ export class HomeExchangeApi {
     if (exchangeType === 1 && senderHomeId) {
       const conv = result.conversation as Record<string, unknown> | undefined;
       const convId = conv?.id;
+      console.error(`[api] sendFirstMessage: reciprocal requested, convId=${convId}, fellBackToGP=${fellBackToGP}, result keys=${Object.keys(result).join(",")}`);
+      if (conv) console.error(`[api] sendFirstMessage: conv keys=${Object.keys(conv).join(",")}, exchanges=${JSON.stringify((conv as any).exchanges ?? "none")}`);
       if (convId) {
         const conversion = await this.attemptReciprocalConversion(convId as number, senderHomeId);
         return {
@@ -589,36 +634,97 @@ export class HomeExchangeApi {
     conversationId: number,
     senderHomeId: number,
     maxRetries = 3,
-    initialDelayMs = 10_000,
-    delayIncrementMs = 5_000
+    delays = [3_000, 5_000, 10_000]
   ): Promise<{ success: boolean; attempts: number; home_used?: number; error?: string }> {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const delayMs = initialDelayMs + (attempt - 1) * delayIncrementMs;
+      const delayMs = delays[attempt - 1] ?? delays[delays.length - 1];
       console.error(`[api] reciprocal: waiting ${delayMs / 1000}s before check ${attempt}/${maxRetries}...`);
       await sleep(delayMs);
 
-      const attachedHome = await this.resolveAttachedHome(conversationId).catch(() => null);
-      if (attachedHome === null) continue; // leg not created yet — wait and re-check
+      const state = await this.checkExchangeState(conversationId).catch(() => ({ homeId: null, type: null }));
 
-      // A home of mine is attached → the exchange is reciprocal. Confirm idempotently.
-      try {
-        await this.patch(
-          `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${attachedHome}`,
-          "bff"
-        );
-      } catch (e) {
-        console.error(`[api] reciprocal confirm warning: ${e instanceof Error ? e.message : String(e)}`);
+      // Already reciprocal (type=1) — success regardless of home match
+      if (state.type === 1) {
+        if (state.homeId !== null && state.homeId !== senderHomeId) {
+          // Reciprocal but wrong home
+          console.error(`[api] reciprocal: type=1 but home=${state.homeId} instead of ${senderHomeId}`);
+          return {
+            success: false,
+            attempts: attempt,
+            home_used: state.homeId,
+            error:
+              `Exchange is reciprocal but with home ${state.homeId} instead of ${senderHomeId}. ` +
+              `Call he_change_exchange_home to correct.`,
+          };
+        }
+        console.error(`[api] reciprocal: exchange already reciprocal (home=${state.homeId ?? "unknown"})`);
+        return { success: true, attempts: attempt, home_used: state.homeId ?? senderHomeId };
       }
-      return { success: true, attempts: attempt, home_used: attachedHome };
+
+      // Home matched but not reciprocal yet — confirm via PATCH
+      if (state.homeId === senderHomeId) {
+        console.error(`[api] reciprocal: home ${senderHomeId} attached, type=${state.type} — confirming via POST`);
+        try {
+          await this.post(
+            `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
+            "bff",
+            {}
+          );
+        } catch (e) {
+          console.error(`[api] reciprocal confirm warning: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        return { success: true, attempts: attempt, home_used: senderHomeId };
+      }
+
+      // Wrong home attached (not reciprocal either) — block
+      if (state.homeId !== null && state.homeId !== senderHomeId) {
+        console.error(`[api] reciprocal: wrong home ${state.homeId} attached (expected ${senderHomeId})`);
+        return {
+          success: false,
+          attempts: attempt,
+          home_used: state.homeId,
+          error:
+            `Server attached home ${state.homeId} instead of ${senderHomeId}. ` +
+            `Call he_change_exchange_type with senderHomeId=${senderHomeId} to correct.`,
+        };
+      }
+
+      // Neither home nor type resolved — exchange data not ready, retry
+      console.error(`[api] reciprocal: no exchange data yet (attempt ${attempt}/${maxRetries})`);
+    }
+
+    // All retries exhausted — best-effort POST then final verification
+    console.error(`[api] reciprocal: retries exhausted — trying direct change-to-reciprocal/${senderHomeId}`);
+    try {
+      await this.post(
+        `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
+        "bff",
+        {}
+      );
+    } catch (e) {
+      console.error(`[api] reciprocal best-effort PATCH: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Final verification
+    const finalState = await this.checkExchangeState(conversationId).catch(() => ({ homeId: null, type: null }));
+    console.error(`[api] reciprocal final check: type=${finalState.type}, homeId=${finalState.homeId}`);
+    if (finalState.type === 1) {
+      return {
+        success: true,
+        attempts: maxRetries,
+        home_used: finalState.homeId ?? senderHomeId,
+      };
+    }
+    if (finalState.homeId === senderHomeId) {
+      return { success: true, attempts: maxRetries, home_used: senderHomeId };
     }
 
     return {
       success: false,
       attempts: maxRetries,
       error:
-        `Conversation stayed GuestPoints: no reciprocal leg was created server-side after the message. ` +
-        `This usually means the offered home (${senderHomeId}) was not eligible for a reciprocal exchange on these dates ` +
-        `(e.g. home not verified, or calendar not open as RECIPROCAL). Verify the home and check its calendar, then retry.`,
+        `Exchange not confirmed as reciprocal after ${maxRetries} checks. ` +
+        `Use he_change_exchange_type with senderHomeId=${senderHomeId} to retry manually.`,
     };
   }
 
@@ -696,22 +802,24 @@ export class HomeExchangeApi {
 
   // ─── Write (Conversations) ──────────────────────────────────────────────
 
-  /** Archive a conversation. */
+  /** Archive a conversation. Returns 204 No Content — we wrap with a confirmation. */
   async archiveConversation(conversationId: number): Promise<unknown> {
-    return this.patch(
+    await this.patch(
       `${API_BASE}/v1/conversations/${conversationId}/archive`,
       "api",
       {}
     );
+    return { success: true, conversationId, action: "archived" };
   }
 
-  /** Unarchive a conversation. */
+  /** Unarchive a conversation. Returns 204 No Content — we wrap with a confirmation. */
   async unarchiveConversation(conversationId: number): Promise<unknown> {
-    return this.patch(
+    await this.patch(
       `${API_BASE}/v1/conversations/${conversationId}/unarchive`,
       "api",
       {}
     );
+    return { success: true, conversationId, action: "unarchived" };
   }
 
   /** Mark a conversation as favorite. */
@@ -744,20 +852,28 @@ export class HomeExchangeApi {
 
   /**
    * Switch an exchange to reciprocal.
-   * Endpoint: PATCH https://bff.homeexchange.com/exchange/{conversationId}/change-to-reciprocal/{senderHomeId}
+   * Endpoint: POST https://bff.homeexchange.com/exchange/{conversationId}/change-to-reciprocal/{senderHomeId}
    *
+   * Checks current state first: if already reciprocal, returns success without calling the BFF.
    * The BFF only accepts {senderHomeId} when it is the home already attached to
-   * my side of this conversation (set at first contact). Passing any other home —
-   * or calling on a pure GuestPoints conversation with no home leg — returns a
-   * generic HTTP 500. We therefore auto-derive the attached home and ignore a
-   * mismatching caller-provided value. `senderHomeId` is now an optional hint:
-   * it is only used as a fallback when no home of mine is attached yet.
+   * my side of this conversation (set at first contact). `senderHomeId` is an
+   * optional hint, only used as a fallback when no home of mine is attached yet.
    */
   async changeExchangeToReciprocal(
     conversationId: number,
     senderHomeId?: number
   ): Promise<unknown> {
-    const attachedHome = await this.resolveAttachedHome(conversationId);
+    // Check current state — skip if already reciprocal
+    const state = await this.checkExchangeState(conversationId);
+    if (state.type === 1) {
+      return {
+        already_reciprocal: true,
+        home_used: state.homeId,
+        note: `Exchange is already reciprocal (type=1). No conversion needed.`,
+      };
+    }
+
+    const attachedHome = state.homeId;
 
     if (attachedHome === null) {
       if (senderHomeId === undefined) {
@@ -769,18 +885,20 @@ export class HomeExchangeApi {
         );
       }
       // No attached leg: best-effort attempt with the caller-provided home.
-      const result = await this.patch<unknown>(
+      const result = await this.post<unknown>(
         `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
-        "bff"
+        "bff",
+        {}
       );
       return { result, home_used: senderHomeId, attached_home: null };
     }
 
     const homeOverridden =
       senderHomeId !== undefined && senderHomeId !== attachedHome;
-    const result = await this.patch<unknown>(
+    const result = await this.post<unknown>(
       `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${attachedHome}`,
-      "bff"
+      "bff",
+      {}
     );
     return {
       result,
