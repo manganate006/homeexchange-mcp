@@ -21,15 +21,18 @@ Browse properties, manage conversations, update your calendar, handle favorites 
 
 ## ✨ Features
 
-- **47 MCP tools** covering read and write operations
+- **51 MCP tools** covering read and write operations
 - 🔍 **Property search** with advanced filters: bounding box, dates, bedrooms, amenities, pool...
 - 💬 **Messaging**: read conversations, send messages, first contact with owners
 - 📅 **Calendar management**: mark periods as available / unavailable / maybe
-- ❤️ **Favorites & wishlists**: add, remove, browse
-- 🔄 **Exchange tracking**: upcoming, ongoing, past
+- ❤️ **Favorites & wishlists**: add, remove, browse, create folders
+- 🔄 **Exchange tracking**: upcoming, ongoing, past — switch type, change home, update dates
 - 🔑 **Auth via JWT token** extracted from the browser — no password stored
 - 💾 Persistent token cache (`~/.homeexchange-mcp-tokens.json`, ~24h TTL)
 - ♻️ Auto-retry on rate limit (429) with exponential backoff
+- 🚦 **Smart rate limiting**: separate delays for reads (500ms), writes (2s) and messages (60s)
+- ✅ **Auth verification**: `he_auth_status` checks tokens against the live API
+- 🛡️ **Pre-flight checks**: `he_send_first_message` validates calendar availability before sending
 
 ---
 
@@ -45,9 +48,9 @@ Browse properties, manage conversations, update your calendar, handle favorites 
 
 ```bash
 # 1. Clone and build
-git clone https://github.com/your-username/homeexchange-mcp
+git clone https://github.com/manganate006/homeexchange-mcp
 cd homeexchange-mcp
-npm install && npm run build
+npm install && npm run bundle
 
 # 2. Get your token (see Authentication section below)
 
@@ -94,24 +97,8 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
     "homeexchange": {
       "type": "stdio",
       "command": "node",
-      "args": ["/absolute/path/to/homeexchange-mcp/dist/index.js"],
-      "env": {
-        "HE_ACCESS_TOKEN": "eyJ...",
-        "HE_REQUEST_DELAY": "1500"
-      }
-    }
-  }
-}
-```
-
-### Global MCP client config (e.g. `mcp_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "homeexchange": {
-      "command": "node",
-      "args": ["/absolute/path/to/homeexchange-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/homeexchange-mcp/dist/bundle.js"],
+      "timeout": 60000,
       "env": {
         "HE_ACCESS_TOKEN": "eyJ..."
       }
@@ -127,21 +114,25 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | `HE_ACCESS_TOKEN` | No* | — | JWT bearer token (`oidc_access_token` cookie) |
 | `HE_REFRESH_TOKEN` | No | — | Refresh token for session renewal |
 | `HE_COOKIES` | No* | — | Raw `document.cookie` string from browser |
-| `HE_REQUEST_DELAY` | No | `1500` | Delay between API requests (ms) |
+| `HE_READ_DELAY` | No | `500` | Delay between read (GET) requests (ms) |
+| `HE_WRITE_DELAY` | No | `2000` | Delay between write requests (ms) |
+| `HE_MESSAGE_DELAY` | No | `60000` | Minimum delay between message sends (ms) |
+| `HE_REQUEST_DELAY` | No | — | Legacy: sets both read and write delay if the new vars aren't set |
 | `HE_WEB_VERSION` | No | `19.7.2` | HomeExchange web version header |
 
 \* At least one auth method required (`HE_ACCESS_TOKEN`, `HE_COOKIES`, or runtime `he_set_tokens`)
 
 ---
 
-## 🛠️ Tools (47)
+## 🛠️ Tools (51)
 
-### 🏠 Properties (4)
+### 🏠 Properties (5)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `he_get_home` | `homeId` | Full property details: location, features, photos, owner, descriptions |
 | `he_get_calendar` | `homeId` | Availability calendar (available / unavailable / maybe periods) |
+| `he_get_calendar_batch` | `homeIds[]` | Calendars for multiple homes in one call (max 20) |
 | `he_get_ratings` | `homeId` | Property reviews: cleanliness, expectations, communication, feedback |
 | `he_get_my_homes` | — | All properties owned by the authenticated user |
 
@@ -153,7 +144,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | `he_get_user_achievements` | `userId` | GuestPoints loyalty level and achievement badges |
 | `he_get_user_ratings` | `userId`, `limit?` | Reviews about a user (as host and guest) |
 
-### ❤️ Favorites (4)
+### ❤️ Favorites (5)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -161,15 +152,16 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | `he_get_favorites_full` | `page?`, `limit?` | Favorites with full property details (paginated) |
 | `he_get_wishlists` | `page?`, `limit?` | Favorite folders / collections |
 | `he_get_who_favorited_me` | `homeId`, `page?`, `limit?` | Users who favorited one of your properties |
+| `he_create_wishlist` | `name` | Create a new favorites folder |
 
 ### 💬 Conversations & Messages (8)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `he_get_conversations` | `filter?`, `first?`, `after?` | Conversations list with pagination (`ALL` / `UNREAD`) |
+| `he_get_conversations` | `filter?`, `first?`, `after?` | Conversations list with pagination and filters (`ALL`, `UNREAD`, `ARCHIVED`…) |
 | `he_get_conversation` | `conversationId` | Detailed conversation info (participants, exchanges) |
 | `he_get_conversation_stats` | — | Stats: unread count, total count |
-| `he_get_messages` | `conversationId` | All messages from a conversation |
+| `he_get_messages` | `conversationId`, `limit?`, `offset?` | Messages from a conversation (paginated) |
 | `he_translate_message` | `messageId`, `targetLanguage` | Translate a single message (e.g. `fr`, `en`, `es`) |
 | `he_translate_messages_batch` | `messageIds[]`, `targetLanguage` | Translate multiple messages at once |
 | `he_search_conversations` | `query` | Search conversations by keyword |
@@ -186,7 +178,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `he_search_homes` | `filters`, `offset?`, `limit?` | Search properties (location bounds, dates, bedrooms, amenities…) |
+| `he_search_homes` | `filters`, `offset?`, `limit?`, `min_response_rate?` | Search properties (location bounds, dates, bedrooms, amenities…) |
 | `he_get_saved_searches` | — | All saved searches |
 | `he_get_saved_search` | `searchId` | Details of a specific saved search |
 | `he_get_last_searches` | — | Recent search history |
@@ -197,7 +189,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `he_send_message` | `conversationId`, `content` | Send a message in an existing conversation |
-| `he_send_first_message` | `receiverId`, `homeId`, `content`, `startOn`, `endOn`, `nbGuest`, `exchangeType?` | First contact with a property owner (creates a new conversation) |
+| `he_send_first_message` | `receiverId`, `homeId`, `content`, `startOn`, `endOn`, `nbGuest`, `exchangeType?`, `senderHomeId?` | First contact with a property owner (creates a new conversation). Pre-flight checks calendar availability. |
 
 ### 📅 Write — Properties (3)
 
@@ -214,20 +206,23 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 | `he_add_favorite` | `homeId`, `wishlistId?` | Add to favorites (optionally in a wishlist) |
 | `he_remove_favorite` | `homeId` | Remove from favorites |
 
-### Write — Conversations (3)
+### Write — Conversations (4)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `he_archive_conversation` | `conversationId` | Archive a conversation |
 | `he_unarchive_conversation` | `conversationId` | Unarchive a conversation |
+| `he_favorite_conversation` | `conversationId`, `favorite?` | Star / unstar a conversation |
 | `he_batch_archive` | `conversationIds[]` | Archive multiple conversations at once |
 
-### Write — Exchanges (3)
+### Write — Exchanges (5)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `he_pre_approve_exchange` | `conversationId` | Pre-approve an exchange request |
 | `he_cancel_exchange` | `conversationId`, `reason` | Cancel an exchange with reason |
+| `he_change_exchange_type` | `conversationId`, `senderHomeId?` | Switch exchange to reciprocal (auto-detects attached home) |
+| `he_change_exchange_home` | `exchangeId`, `homeId` | Change which home is proposed in an exchange |
 | `he_rate_home` | `conversationId`, `clean`, `expectation`, `communication`, `feedback?` | Rate a property after an exchange (scores 1–5) |
 
 ### Write — Saved Searches (2)
@@ -247,7 +242,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `he_auth_status` | — | Check auth status: logged in, token expiry, source |
+| `he_auth_status` | — | Check auth status + verify token against live API |
 | `he_set_tokens` | `accessToken`, `refreshToken?` | Inject tokens at runtime (no restart needed) |
 | `he_set_cookies` | `cookies` | Inject full cookie string (include `PHPSESSID` for auto-renewal) |
 | `he_refresh_token` | — | Force token renewal via stored `PHPSESSID` session cookie |
@@ -268,6 +263,8 @@ Mark my home's calendar as unavailable from July 15 to August 20
 Send a message to conversation 67890: "Hello, we're very interested in your property..."
 
 Check my authentication status
+
+Switch exchange in conversation 11111 to reciprocal
 ```
 
 ---
@@ -285,12 +282,14 @@ Check my authentication status
   "guests_nb": 4,
   "home": {
     "size": { "bedrooms": 2 },
-    "amenities": ["swimming_pool"],
-    "type": [1, 2]
+    "amenities": ["swimming-pool"],
+    "type": "home"
   },
   "calendar": {
     "date_ranges": [{ "from": "2026-08-05", "to": "2026-08-19" }]
-  }
+  },
+  "exchange_type": "reciprocal",
+  "filters": ["home-verified", "response-rate-above-threshold"]
 }
 ```
 
@@ -301,7 +300,7 @@ Check my authentication status
 ```
 src/
 ├── index.ts    — Entry point, StdioServerTransport, env validation
-├── server.ts   — 47 MCP tool definitions + request dispatch
+├── server.ts   — 51 MCP tool definitions + request dispatch
 ├── api.ts      — HTTP client (BFF + Main API, rate limiting, retries)
 ├── auth.ts     — Token management, browser cookie parsing, disk cache
 └── types.ts    — TypeScript interfaces
@@ -315,10 +314,10 @@ src/
 
 ## ⚠️ Limitations
 
-- **No auto-login**: token must be manually extracted from the browser every ~24h
+- **No auto-login**: token must be manually extracted from the browser every ~24h (unless `PHPSESSID` enables auto-renewal)
 - **No image upload**: multipart upload for property/profile photos not yet implemented
 - **No property creation**: `POST /v1/homes` not yet exposed
-- Rate limiting: default 1500ms between requests (configurable via `HE_REQUEST_DELAY`)
+- **Conversation pagination**: the v3 API ignores cursor-based `after` — pagination is handled client-side
 
 ---
 
@@ -327,8 +326,9 @@ src/
 Contributions are welcome! Feel free to open an issue or submit a pull request.
 
 ```bash
-npm run dev   # Watch mode for development
-npm run build # Build for production
+npm run dev      # Watch mode for development
+npm run build    # Compile TypeScript
+npm run bundle   # Bundle for production (single file, fast startup)
 ```
 
 ---
@@ -361,15 +361,18 @@ Parcourez des propriétés, gérez vos conversations, mettez à jour votre calen
 
 ## ✨ Fonctionnalités
 
-- **47 outils MCP** couvrant les opérations de lecture et d'écriture
+- **51 outils MCP** couvrant les opérations de lecture et d'écriture
 - 🔍 **Recherche de propriétés** avec filtres avancés : zone géographique, dates, chambres, équipements, piscine...
 - 💬 **Messagerie** : lire les conversations, envoyer des messages, premier contact avec des propriétaires
 - 📅 **Gestion du calendrier** : marquer des périodes comme disponible / indisponible / peut-être
-- ❤️ **Favoris & dossiers** : ajouter, retirer, parcourir
-- 🔄 **Suivi des échanges** : à venir, en cours, passés
+- ❤️ **Favoris & dossiers** : ajouter, retirer, parcourir, créer des dossiers
+- 🔄 **Suivi des échanges** : à venir, en cours, passés — changer de type, changer de logement, modifier les dates
 - 🔑 **Auth par token JWT** extrait du navigateur — aucun mot de passe stocké
 - 💾 Cache de token persistant (`~/.homeexchange-mcp-tokens.json`, durée de vie ~24h)
 - ♻️ Retry automatique sur les erreurs 429 avec backoff exponentiel
+- 🚦 **Rate limiting intelligent** : délais séparés pour lectures (500ms), écritures (2s) et messages (60s)
+- ✅ **Vérification auth** : `he_auth_status` vérifie les tokens contre l'API en live
+- 🛡️ **Vérifications pré-envoi** : `he_send_first_message` valide la disponibilité du calendrier avant l'envoi
 
 ---
 
@@ -385,9 +388,9 @@ Parcourez des propriétés, gérez vos conversations, mettez à jour votre calen
 
 ```bash
 # 1. Cloner et compiler
-git clone https://github.com/your-username/homeexchange-mcp
+git clone https://github.com/manganate006/homeexchange-mcp
 cd homeexchange-mcp
-npm install && npm run build
+npm install && npm run bundle
 
 # 2. Récupérer votre token (voir section Authentification ci-dessous)
 
@@ -434,24 +437,8 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
     "homeexchange": {
       "type": "stdio",
       "command": "node",
-      "args": ["/chemin/absolu/vers/homeexchange-mcp/dist/index.js"],
-      "env": {
-        "HE_ACCESS_TOKEN": "eyJ...",
-        "HE_REQUEST_DELAY": "1500"
-      }
-    }
-  }
-}
-```
-
-### Config globale du client MCP (ex. `mcp_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "homeexchange": {
-      "command": "node",
-      "args": ["/chemin/absolu/vers/homeexchange-mcp/dist/index.js"],
+      "args": ["/chemin/absolu/vers/homeexchange-mcp/dist/bundle.js"],
+      "timeout": 60000,
       "env": {
         "HE_ACCESS_TOKEN": "eyJ..."
       }
@@ -467,21 +454,25 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | `HE_ACCESS_TOKEN` | Non* | — | Token JWT Bearer (cookie `oidc_access_token`) |
 | `HE_REFRESH_TOKEN` | Non | — | Token de refresh pour renouveler la session |
 | `HE_COOKIES` | Non* | — | Chaîne `document.cookie` brute du navigateur |
-| `HE_REQUEST_DELAY` | Non | `1500` | Délai entre les requêtes API (ms) |
+| `HE_READ_DELAY` | Non | `500` | Délai entre les requêtes de lecture GET (ms) |
+| `HE_WRITE_DELAY` | Non | `2000` | Délai entre les requêtes d'écriture (ms) |
+| `HE_MESSAGE_DELAY` | Non | `60000` | Délai minimum entre les envois de messages (ms) |
+| `HE_REQUEST_DELAY` | Non | — | Legacy : définit les délais read et write si les nouvelles variables ne sont pas définies |
 | `HE_WEB_VERSION` | Non | `19.7.2` | Header de version web HomeExchange |
 
 \* Au moins une méthode d'auth requise (`HE_ACCESS_TOKEN`, `HE_COOKIES` ou `he_set_tokens` au runtime)
 
 ---
 
-## 🛠️ Outils (47)
+## 🛠️ Outils (51)
 
-### 🏠 Propriétés (4)
+### 🏠 Propriétés (5)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
 | `he_get_home` | `homeId` | Détails complets : localisation, équipements, photos, propriétaire, descriptions |
 | `he_get_calendar` | `homeId` | Calendrier de disponibilité (disponible / indisponible / peut-être) |
+| `he_get_calendar_batch` | `homeIds[]` | Calendriers de plusieurs propriétés en un seul appel (max 20) |
 | `he_get_ratings` | `homeId` | Avis : propreté, conformité aux attentes, communication, retours texte |
 | `he_get_my_homes` | — | Toutes les propriétés de l'utilisateur connecté |
 
@@ -493,7 +484,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | `he_get_user_achievements` | `userId` | Niveau de fidélité GuestPoints et badges |
 | `he_get_user_ratings` | `userId`, `limit?` | Avis sur un utilisateur (en tant qu'hôte et invité) |
 
-### ❤️ Favoris (4)
+### ❤️ Favoris (5)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
@@ -501,15 +492,16 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | `he_get_favorites_full` | `page?`, `limit?` | Favoris avec détails complets des propriétés (paginé) |
 | `he_get_wishlists` | `page?`, `limit?` | Dossiers de favoris |
 | `he_get_who_favorited_me` | `homeId`, `page?`, `limit?` | Utilisateurs ayant mis votre propriété en favori |
+| `he_create_wishlist` | `name` | Créer un nouveau dossier de favoris |
 
 ### 💬 Conversations & Messages (8)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
-| `he_get_conversations` | `filter?`, `first?`, `after?` | Liste des conversations avec pagination (`ALL` / `UNREAD`) |
+| `he_get_conversations` | `filter?`, `first?`, `after?` | Liste des conversations avec pagination et filtres (`ALL`, `UNREAD`, `ARCHIVED`…) |
 | `he_get_conversation` | `conversationId` | Détails d'une conversation (participants, échanges) |
 | `he_get_conversation_stats` | — | Statistiques : non lus, total |
-| `he_get_messages` | `conversationId` | Tous les messages d'une conversation |
+| `he_get_messages` | `conversationId`, `limit?`, `offset?` | Messages d'une conversation (paginé) |
 | `he_translate_message` | `messageId`, `targetLanguage` | Traduire un message (ex. `fr`, `en`, `es`) |
 | `he_translate_messages_batch` | `messageIds[]`, `targetLanguage` | Traduire plusieurs messages en une fois |
 | `he_search_conversations` | `query` | Rechercher dans les conversations par mot-clé |
@@ -526,7 +518,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
-| `he_search_homes` | `filters`, `offset?`, `limit?` | Recherche de propriétés (zone, dates, chambres, équipements…) |
+| `he_search_homes` | `filters`, `offset?`, `limit?`, `min_response_rate?` | Recherche de propriétés (zone, dates, chambres, équipements…) |
 | `he_get_saved_searches` | — | Toutes les recherches sauvegardées |
 | `he_get_saved_search` | `searchId` | Détails d'une recherche sauvegardée |
 | `he_get_last_searches` | — | Historique des dernières recherches |
@@ -537,7 +529,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
 | `he_send_message` | `conversationId`, `content` | Envoyer un message dans une conversation existante |
-| `he_send_first_message` | `receiverId`, `homeId`, `content`, `startOn`, `endOn`, `nbGuest`, `exchangeType?` | Premier contact avec un propriétaire (crée une nouvelle conversation) |
+| `he_send_first_message` | `receiverId`, `homeId`, `content`, `startOn`, `endOn`, `nbGuest`, `exchangeType?`, `senderHomeId?` | Premier contact avec un propriétaire (crée une conversation). Vérifie la disponibilité du calendrier. |
 
 ### 📅 Écriture — Propriétés (3)
 
@@ -554,20 +546,23 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 | `he_add_favorite` | `homeId`, `wishlistId?` | Ajouter aux favoris (optionnellement dans un dossier) |
 | `he_remove_favorite` | `homeId` | Retirer des favoris |
 
-### Écriture — Conversations (3)
+### Écriture — Conversations (4)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
 | `he_archive_conversation` | `conversationId` | Archiver une conversation |
 | `he_unarchive_conversation` | `conversationId` | Désarchiver une conversation |
+| `he_favorite_conversation` | `conversationId`, `favorite?` | Ajouter / retirer une conversation des favoris (étoile) |
 | `he_batch_archive` | `conversationIds[]` | Archiver plusieurs conversations en une fois |
 
-### Écriture — Échanges (3)
+### Écriture — Échanges (5)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
 | `he_pre_approve_exchange` | `conversationId` | Pré-approuver une demande d'échange |
 | `he_cancel_exchange` | `conversationId`, `reason` | Annuler un échange avec une raison |
+| `he_change_exchange_type` | `conversationId`, `senderHomeId?` | Passer l'échange en réciproque (détecte automatiquement le logement attaché) |
+| `he_change_exchange_home` | `exchangeId`, `homeId` | Changer le logement proposé dans un échange |
 | `he_rate_home` | `conversationId`, `clean`, `expectation`, `communication`, `feedback?` | Noter une propriété après un échange (scores 1–5) |
 
 ### Écriture — Recherches sauvegardées (2)
@@ -587,7 +582,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
-| `he_auth_status` | — | Vérifier le statut : connecté, expiration du token, source |
+| `he_auth_status` | — | Vérifier le statut + validation du token contre l'API en live |
 | `he_set_tokens` | `accessToken`, `refreshToken?` | Injecter des tokens au runtime (sans redémarrage) |
 | `he_set_cookies` | `cookies` | Injecter la chaîne complète de cookies (inclure `PHPSESSID` pour le renouvellement auto) |
 | `he_refresh_token` | — | Forcer le renouvellement du token via le cookie de session `PHPSESSID` stocké |
@@ -608,6 +603,8 @@ Marque mon calendrier comme indisponible du 15 juillet au 20 août
 Envoie un message à la conversation 67890 : "Bonjour, votre propriété nous intéresse beaucoup..."
 
 Vérifie mon statut d'authentification
+
+Passe l'échange de la conversation 11111 en réciproque
 ```
 
 ---
@@ -625,12 +622,14 @@ Vérifie mon statut d'authentification
   "guests_nb": 4,
   "home": {
     "size": { "bedrooms": 2 },
-    "amenities": ["swimming_pool"],
-    "type": [1, 2]
+    "amenities": ["swimming-pool"],
+    "type": "home"
   },
   "calendar": {
     "date_ranges": [{ "from": "2026-08-05", "to": "2026-08-19" }]
-  }
+  },
+  "exchange_type": "reciprocal",
+  "filters": ["home-verified", "response-rate-above-threshold"]
 }
 ```
 
@@ -641,7 +640,7 @@ Vérifie mon statut d'authentification
 ```
 src/
 ├── index.ts    — Point d'entrée, StdioServerTransport, validation des env vars
-├── server.ts   — Définition des 47 outils MCP + dispatch des requêtes
+├── server.ts   — Définition des 51 outils MCP + dispatch des requêtes
 ├── api.ts      — Client HTTP (BFF + API principale, rate limiting, retries)
 ├── auth.ts     — Gestion des tokens, parsing des cookies navigateur, cache disque
 └── types.ts    — Interfaces TypeScript
@@ -655,10 +654,10 @@ src/
 
 ## ⚠️ Limitations
 
-- **Pas de connexion automatique** : le token doit être extrait manuellement du navigateur toutes les ~24h
+- **Pas de connexion automatique** : le token doit être extrait manuellement du navigateur toutes les ~24h (sauf si `PHPSESSID` active le renouvellement auto)
 - **Pas d'upload d'images** : l'upload multipart pour les photos n'est pas encore implémenté
 - **Pas de création de propriété** : l'endpoint `POST /v1/homes` n'est pas encore exposé
-- Rate limiting : 1500ms entre les requêtes par défaut (configurable via `HE_REQUEST_DELAY`)
+- **Pagination conversations** : l'API v3 ignore le curseur `after` — la pagination est gérée côté client
 
 ---
 
@@ -667,8 +666,9 @@ src/
 Les contributions sont les bienvenues ! N'hésitez pas à ouvrir une issue ou à soumettre une pull request.
 
 ```bash
-npm run dev   # Mode watch pour le développement
-npm run build # Compiler pour la production
+npm run dev      # Mode watch pour le développement
+npm run build    # Compiler TypeScript
+npm run bundle   # Bundler pour la production (fichier unique, démarrage rapide)
 ```
 
 ---
