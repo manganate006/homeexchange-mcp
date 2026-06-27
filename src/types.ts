@@ -148,6 +148,11 @@ export interface ConversationsResponse {
   data: {
     conversations: {
       edges: ConversationEdge[];
+      totalCount?: number;
+      pageInfo?: {
+        hasNextPage: boolean;
+        endCursor?: string;
+      };
     };
   };
 }

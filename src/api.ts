@@ -12,14 +12,20 @@ const API_BASE = "https://api.homeexchange.com";
 
 export class HomeExchangeApi {
   private auth: HomeExchangeAuth;
-  private requestDelay: number;
+  private readDelay: number;
+  private writeDelay: number;
+  private messageDelay: number;
   private lastRequestAt = 0;
+  private lastMessageAt = 0;
   /** Cache of the authenticated user's home IDs (lazy-loaded). */
   private myHomeIdsCache: number[] | null = null;
 
-  constructor(auth: HomeExchangeAuth, requestDelay = 1500) {
+  constructor(auth: HomeExchangeAuth, readDelay = 500, writeDelay = 2000, messageDelay = 60_000) {
     this.auth = auth;
-    this.requestDelay = requestDelay;
+    this.readDelay = readDelay;
+    this.writeDelay = writeDelay;
+    this.messageDelay = messageDelay;
+    console.error(`[api] Rate limits: GET=${readDelay}ms, write=${writeDelay}ms, message=${messageDelay}ms`);
   }
 
   // ─── Read ──────────────────────────────────────────────────────────────────
@@ -63,10 +69,12 @@ export class HomeExchangeApi {
     first = 10,
     after = 0
   ): Promise<unknown> {
+    // API ignores numeric `after` (expects GraphQL cursor) — fetch enough
+    // items to cover the requested page and slice client-side.
+    const fetchCount = after + first;
     const params = new URLSearchParams({
       filter,
-      first: String(first),
-      after: String(after),
+      first: String(fetchCount),
     });
     const raw = await this.get(
       `${API_BASE}/v3/conversations/me?${params}`,
@@ -81,14 +89,16 @@ export class HomeExchangeApi {
     first: number,
     after: number
   ): unknown {
-    const edges = raw?.data?.conversations?.edges;
+    const conn = raw?.data?.conversations;
+    const edges = conn?.edges;
     if (!Array.isArray(edges)) return raw;
 
-    // The API may ignore `first` param — enforce client-side
-    const paged = edges.slice(after, after + first);
-    const total = edges.length;
+    const total = conn.totalCount ?? edges.length;
+    const paged = edges.slice(after);
+    const page = paged.slice(0, first);
+    const hasMore = conn.pageInfo?.hasNextPage ?? (paged.length > first);
 
-    const slim = paged.map((edge) => {
+    const slim = page.map((edge) => {
       const c = edge.node ?? (edge as unknown as Record<string, unknown>);
       const conv = c as unknown as Record<string, unknown>;
       const lastMsg = conv.last_message as Record<string, unknown> | undefined;
@@ -131,7 +141,8 @@ export class HomeExchangeApi {
       returned: slim.length,
       first,
       after,
-      has_more: after + first < total,
+      has_more: hasMore,
+      next_after: hasMore ? after + first : undefined,
       conversations: slim,
     };
   }
@@ -544,6 +555,7 @@ export class HomeExchangeApi {
     conversationId: number,
     content: string
   ): Promise<unknown> {
+    await this.messageThrottle();
     return this.post(`${API_BASE}/v1/messages`, "api", {
       conversation: conversationId,
       content,
@@ -565,6 +577,43 @@ export class HomeExchangeApi {
     exchangeType?: number,
     senderHomeId?: number
   ): Promise<unknown> {
+    // ── Message throttle (60s between sends) ───────────────────
+    await this.messageThrottle();
+
+    // ── Pre-flight checks ──────────────────────────────────────
+    try {
+      const [home, calendar] = await Promise.all([
+        this.getHome(homeId),
+        this.getHomeCalendar(homeId),
+      ]);
+
+      const start = new Date(startOn);
+      const end = new Date(endOn);
+      // API returns { data: [{ start_on, end_on, type: "BOOKED"|"AVAILABLE"|"RECIPROCAL"|"NON_RECIPROCAL" }] }
+      const periods: any[] = (calendar as any).data ?? (calendar as any).periods ?? [];
+      const overlapping = periods.filter((p: any) => {
+        const pStart = new Date(p.start_on ?? p.start);
+        const pEnd = new Date(p.end_on ?? p.end);
+        const pType = p.type ?? p.status;
+        return pType !== "BOOKED" && pType !== 2 && pStart < end && pEnd > start;
+      });
+      const calendarOpen = overlapping.length > 0;
+
+      if (!calendarOpen && !home.contact_allowed) {
+        return {
+          error: "contact_blocked",
+          message: `Home ${homeId} has no open dates between ${startOn} and ${endOn}, and the owner only accepts contact when dates are explicitly open.`,
+          homeId,
+          contact_allowed: false,
+          requested: { startOn, endOn },
+          calendar_periods: calendar.periods?.slice(0, 10),
+        };
+      }
+    } catch (e) {
+      console.error(`[api] sendFirstMessage pre-flight check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // ── Send message ───────────────────────────────────────────
     const body: Record<string, unknown> = {
       receiver: receiverId,
       home: homeId,
@@ -587,9 +636,12 @@ export class HomeExchangeApi {
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       if (exchangeType === 1 && errMsg.includes("400") && errMsg.toLowerCase().includes("calendar")) {
-        console.error(`[api] sendFirstMessage: calendar conflict for reciprocal, falling back to GuestPoints. Error: ${errMsg}`);
-        body.exchange_type = 2;
-        // keep body.sender_home = senderHomeId so HE creates a GP exchange with the correct home attached
+        // Extract the allowed type from the error if present (e.g. "Type available for these dates is integer 3")
+        const typeMatch = errMsg.match(/type available[^]*?integer\s+(\d+)/i);
+        const fallbackType = typeMatch ? parseInt(typeMatch[1], 10) : 2;
+        console.error(`[api] sendFirstMessage: calendar conflict for reciprocal, falling back to type=${fallbackType}. Error: ${errMsg}`);
+        body.exchange_type = fallbackType;
+        // keep body.sender_home = senderHomeId so HE creates an exchange with the correct home attached
         result = await this.post<Record<string, unknown>>(`${API_BASE}/v1/messages`, "api", body);
         fellBackToGP = true;
       } else {
@@ -633,8 +685,8 @@ export class HomeExchangeApi {
   private async attemptReciprocalConversion(
     conversationId: number,
     senderHomeId: number,
-    maxRetries = 3,
-    delays = [3_000, 5_000, 10_000]
+    maxRetries = 2,
+    delays = [3_000, 6_000]
   ): Promise<{ success: boolean; attempts: number; home_used?: number; error?: string }> {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const delayMs = delays[attempt - 1] ?? delays[delays.length - 1];
@@ -665,13 +717,14 @@ export class HomeExchangeApi {
       if (state.homeId === senderHomeId) {
         console.error(`[api] reciprocal: home ${senderHomeId} attached, type=${state.type} — confirming via POST`);
         try {
-          await this.post(
+          await this.patch(
             `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
-            "bff",
-            {}
+            "bff"
           );
         } catch (e) {
-          console.error(`[api] reciprocal confirm warning: ${e instanceof Error ? e.message : String(e)}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          // 409 = already reciprocal — still a success
+          if (!msg.includes("409")) console.error(`[api] reciprocal confirm warning: ${msg}`);
         }
         return { success: true, attempts: attempt, home_used: senderHomeId };
       }
@@ -696,13 +749,16 @@ export class HomeExchangeApi {
     // All retries exhausted — best-effort POST then final verification
     console.error(`[api] reciprocal: retries exhausted — trying direct change-to-reciprocal/${senderHomeId}`);
     try {
-      await this.post(
+      await this.patch(
         `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
-        "bff",
-        {}
+        "bff"
       );
+      return { success: true, attempts: maxRetries, home_used: senderHomeId };
     } catch (e) {
-      console.error(`[api] reciprocal best-effort PATCH: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      // 409 = already reciprocal — success
+      if (msg.includes("409")) return { success: true, attempts: maxRetries, home_used: senderHomeId };
+      console.error(`[api] reciprocal best-effort PATCH: ${msg}`);
     }
 
     // Final verification
@@ -852,7 +908,7 @@ export class HomeExchangeApi {
 
   /**
    * Switch an exchange to reciprocal.
-   * Endpoint: POST https://bff.homeexchange.com/exchange/{conversationId}/change-to-reciprocal/{senderHomeId}
+   * Endpoint: PATCH https://bff.homeexchange.com/exchange/{conversationId}/change-to-reciprocal/{senderHomeId}
    *
    * Checks current state first: if already reciprocal, returns success without calling the BFF.
    * The BFF only accepts {senderHomeId} when it is the home already attached to
@@ -875,40 +931,39 @@ export class HomeExchangeApi {
 
     const attachedHome = state.homeId;
 
-    if (attachedHome === null) {
-      if (senderHomeId === undefined) {
-        throw new Error(
-          `No home of yours is attached to conversation ${conversationId} ` +
-            `(pure GuestPoints conversation). Cannot convert to reciprocal: ` +
-            `this endpoint can only confirm a home already paired in the conversation. ` +
-            `Provide senderHomeId explicitly to attempt creating a reciprocal leg.`
-        );
-      }
-      // No attached leg: best-effort attempt with the caller-provided home.
-      const result = await this.post<unknown>(
-        `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${senderHomeId}`,
-        "bff",
-        {}
+    const homeToUse = attachedHome ?? senderHomeId;
+    if (!homeToUse) {
+      throw new Error(
+        `No home of yours is attached to conversation ${conversationId} ` +
+          `(pure GuestPoints conversation). Provide senderHomeId explicitly.`
       );
-      return { result, home_used: senderHomeId, attached_home: null };
     }
 
-    const homeOverridden =
-      senderHomeId !== undefined && senderHomeId !== attachedHome;
-    const result = await this.post<unknown>(
-      `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${attachedHome}`,
-      "bff",
-      {}
-    );
-    return {
-      result,
-      home_used: attachedHome,
-      ...(homeOverridden
-        ? {
-            note: `Ignored provided senderHomeId=${senderHomeId}; used home ${attachedHome} attached to this conversation.`,
-          }
-        : {}),
-    };
+    try {
+      const result = await this.patch<unknown>(
+        `${BFF_BASE}/exchange/${conversationId}/change-to-reciprocal/${homeToUse}`,
+        "bff"
+      );
+      return {
+        result,
+        home_used: homeToUse,
+        ...(attachedHome === null ? { attached_home: null } : {}),
+        ...(senderHomeId !== undefined && senderHomeId !== homeToUse
+          ? { note: `Used home ${homeToUse} attached to conversation (ignored senderHomeId=${senderHomeId}).` }
+          : {}),
+      };
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      // 409 = already reciprocal — treat as success
+      if (errMsg.includes("409")) {
+        return {
+          already_reciprocal: true,
+          home_used: homeToUse,
+          note: "Exchange is already reciprocal (BFF returned 409 Conflict).",
+        };
+      }
+      throw e;
+    }
   }
 
   /**
@@ -1004,8 +1059,8 @@ export class HomeExchangeApi {
     retried = false,
     extraHeaders?: Record<string, string>
   ): Promise<T> {
-    // Rate limiting
-    await this.rateLimit();
+    // Rate limiting — GET is faster, writes are throttled
+    await this.rateLimit(method);
 
     // Ensure auth
     await this.auth.ensureAuthenticated();
@@ -1059,11 +1114,23 @@ export class HomeExchangeApi {
     return (await res.text()) as unknown as T;
   }
 
-  private async rateLimit(): Promise<void> {
+  private async messageThrottle(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastMessageAt;
+    if (this.lastMessageAt > 0 && elapsed < this.messageDelay) {
+      const waitMs = this.messageDelay - elapsed;
+      console.error(`[api] message throttle: waiting ${Math.round(waitMs / 1000)}s before next message send...`);
+      await sleep(waitMs);
+    }
+    this.lastMessageAt = Date.now();
+  }
+
+  private async rateLimit(method: string): Promise<void> {
+    const delay = method === "GET" ? this.readDelay : this.writeDelay;
     const now = Date.now();
     const elapsed = now - this.lastRequestAt;
-    if (elapsed < this.requestDelay) {
-      await sleep(this.requestDelay - elapsed);
+    if (elapsed < delay) {
+      await sleep(delay - elapsed);
     }
     this.lastRequestAt = Date.now();
   }

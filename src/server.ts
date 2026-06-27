@@ -1113,7 +1113,21 @@ export function createServer(
 
         // ── Utility ───────────────────────────────────────────────────
         case "he_auth_status": {
-          return textResult(auth.getStatus());
+          const status = auth.getStatus();
+          if (status.authenticated) {
+            try {
+              await api.getMyHomes();
+              (status as Record<string, unknown>).verified = true;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              (status as Record<string, unknown>).verified = false;
+              (status as Record<string, unknown>).warning =
+                msg.includes("401")
+                  ? "Token is cached but REJECTED by API (revoked server-side). Re-inject fresh cookies via he_set_cookies."
+                  : `Token verification failed: ${msg.slice(0, 200)}`;
+            }
+          }
+          return textResult(status);
         }
         case "he_set_tokens": {
           const { accessToken, refreshToken } = SetTokensSchema.parse(args);
