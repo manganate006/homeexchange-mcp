@@ -278,12 +278,92 @@ export class HomeExchangeApi {
 
   // ─── Read (Conversations enriched) ───────────────────────────────────────
 
-  /** Get single conversation details. */
+  /** Get single conversation details. Slims the response to avoid token overflow. */
   async getConversation(conversationId: number): Promise<unknown> {
-    return this.get(
-      `${API_BASE}/v3/conversations/me/${conversationId}`,
-      "api"
-    );
+    try {
+      const raw = await this.get<unknown>(
+        `${API_BASE}/v3/conversations/me/${conversationId}`,
+        "api"
+      );
+      return this.slimConversationDetail(raw);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("404") || msg.includes("conversations.not_found")) {
+        // Exchange-type conversations are not in the regular v3 endpoint — try BFF
+        console.error(`[api] getConversation: 404 on v3, trying BFF exchange/v2 for ${conversationId}`);
+        const raw = await this.get<unknown>(
+          `${BFF_BASE}/exchange/v2/${conversationId}`,
+          "bff"
+        );
+        return this.slimConversationDetail(raw);
+      }
+      throw err;
+    }
+  }
+
+  /** Strip verbose fields (photos, long descriptions, full profiles) from a conversation detail response. */
+  private slimConversationDetail(raw: unknown): unknown {
+    const r = raw as Record<string, unknown>;
+    // Unwrap various response shapes: { data: { conversation } }, { conversation }, or flat
+    const conv: Record<string, unknown> =
+      ((r?.data as any)?.conversation) ?? r?.conversation ?? r ?? {};
+
+    const participants = (conv.participants ?? conv.members) as unknown[] | undefined;
+    const slimParticipants = Array.isArray(participants)
+      ? participants.map((p: unknown) => {
+          const u = p as Record<string, unknown>;
+          return {
+            id: u.id,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            profile_picture: u.profile_picture ?? u.avatar,
+          };
+        })
+      : undefined;
+
+    const lastMsg = conv.last_message as Record<string, unknown> | undefined;
+    const msgAuthor = lastMsg?.author as Record<string, unknown> | undefined;
+    const msgContent = lastMsg?.content as string | undefined;
+    const slimLastMsg = lastMsg
+      ? {
+          id: lastMsg.id,
+          content: msgContent && msgContent.length > 300 ? msgContent.slice(0, 300) + "…" : msgContent,
+          send_at: lastMsg.send_at,
+          author: msgAuthor ? { id: msgAuthor.id, first_name: msgAuthor.first_name } : undefined,
+        }
+      : undefined;
+
+    const exchanges = conv.exchanges as unknown[] | undefined;
+    const slimExchanges = Array.isArray(exchanges)
+      ? exchanges.map((ex: unknown) => {
+          const e = ex as Record<string, unknown>;
+          const home = e.home as Record<string, unknown> | undefined;
+          const senderHome = e.sender_home as Record<string, unknown> | undefined;
+          return {
+            id: e.id,
+            status: e.status,
+            type: e.type ?? e.exchange_type,
+            start_on: e.start_on,
+            end_on: e.end_on,
+            nb_guest: e.nb_guest ?? e.nb_guests,
+            home: home ? { id: home.id, title: home.title } : undefined,
+            sender_home: senderHome ? { id: senderHome.id, title: senderHome.title } : undefined,
+          };
+        })
+      : undefined;
+
+    return {
+      id: conv.id,
+      title: conv.title,
+      status: conv.status,
+      created_at: conv.created_at,
+      updated_at: conv.updated_at,
+      message_count: conv.message_count,
+      unread_messages_count: conv.unread_messages_count,
+      participants: slimParticipants,
+      last_message: slimLastMsg,
+      exchanges: slimExchanges,
+    };
   }
 
   /** Get conversation stats (unread counts etc.). */
