@@ -19,13 +19,20 @@ export class HomeExchangeApi {
   private lastMessageAt = 0;
   /** Cache of the authenticated user's home IDs (lazy-loaded). */
   private myHomeIdsCache: number[] | null = null;
+  /** Generic TTL cache for read responses. Key = method:params, value = slimmed result. */
+  private cache = new Map<string, { data: unknown; expiresAt: number }>();
+  private readonly convsTtl: number;
+  private readonly staticTtl: number;
 
   constructor(auth: HomeExchangeAuth, readDelay = 500, writeDelay = 2000, messageDelay = 60_000) {
     this.auth = auth;
     this.readDelay = readDelay;
     this.writeDelay = writeDelay;
     this.messageDelay = messageDelay;
+    this.convsTtl = parseInt(process.env.HE_CACHE_TTL_CONVERSATIONS || "180000", 10); // 3 min
+    this.staticTtl = parseInt(process.env.HE_CACHE_TTL_STATIC || "1800000", 10); // 30 min
     console.error(`[api] Rate limits: GET=${readDelay}ms, write=${writeDelay}ms, message=${messageDelay}ms`);
+    console.error(`[api] Cache TTL: conversations=${this.convsTtl}ms, static=${this.staticTtl}ms`);
   }
 
   // ─── Read ──────────────────────────────────────────────────────────────────
@@ -63,12 +70,19 @@ export class HomeExchangeApi {
     return this.get(`${BFF_BASE}/favorites/ids`, "bff");
   }
 
-  /** Get conversations list (slimmed). */
+  /** Get conversations list (slimmed). `fields` restricts which field groups are included per item. */
   async getConversations(
     filter: string = "ALL",
     first = 10,
-    after = 0
+    after = 0,
+    fields: string[] = []
   ): Promise<unknown> {
+    const cacheKey = `convs:${filter}:${first}:${after}`;
+    const cached = this.getCached<unknown>(cacheKey);
+    if (cached !== null) {
+      console.error(`[api] cache hit: ${cacheKey}`);
+      return fields.length ? this.filterConversationFields(cached, fields) : cached;
+    }
     // API ignores numeric `after` (expects GraphQL cursor) — fetch enough
     // items to cover the requested page and slice client-side.
     const fetchCount = after + first;
@@ -80,7 +94,32 @@ export class HomeExchangeApi {
       `${API_BASE}/v3/conversations/me?${params}`,
       "api"
     ) as ConversationsResponse;
-    return this.slimConversationsResponse(raw, first, after);
+    const result = this.slimConversationsResponse(raw, first, after);
+    this.setCached(cacheKey, result, this.convsTtl);
+    return fields.length ? this.filterConversationFields(result, fields) : result;
+  }
+
+  /** Apply field-group filtering to a slimmed conversations response. */
+  private filterConversationFields(result: unknown, fields: string[]): unknown {
+    const r = result as Record<string, unknown>;
+    const convs = r.conversations as Record<string, unknown>[];
+    if (!Array.isArray(convs)) return result;
+    const filtered = convs.map((c) => {
+      const out: Record<string, unknown> = { id: c.id };
+      if (fields.includes("meta")) {
+        out.title = c.title;
+        out.created_at = c.created_at;
+        out.updated_at = c.updated_at;
+      }
+      if (fields.includes("stats")) {
+        out.message_count = c.message_count;
+        out.unread_messages_count = c.unread_messages_count;
+      }
+      if (fields.includes("last_message")) out.last_message = c.last_message;
+      if (fields.includes("exchanges")) out.exchanges = c.exchanges;
+      return out;
+    });
+    return { ...r, conversations: filtered };
   }
 
   /** Strip verbose fields from conversations to stay within context limits. */
@@ -280,12 +319,20 @@ export class HomeExchangeApi {
 
   /** Get single conversation details. Slims the response to avoid token overflow. */
   async getConversation(conversationId: number): Promise<unknown> {
+    const cacheKey = `conv:${conversationId}`;
+    const cached = this.getCached<unknown>(cacheKey);
+    if (cached !== null) {
+      console.error(`[api] cache hit: ${cacheKey}`);
+      return cached;
+    }
     try {
       const raw = await this.get<unknown>(
         `${API_BASE}/v3/conversations/me/${conversationId}`,
         "api"
       );
-      return this.slimConversationDetail(raw);
+      const result = this.slimConversationDetail(raw);
+      this.setCached(cacheKey, result, this.convsTtl);
+      return result;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("404") || msg.includes("conversations.not_found")) {
@@ -295,7 +342,9 @@ export class HomeExchangeApi {
           `${BFF_BASE}/exchange/v2/${conversationId}`,
           "bff"
         );
-        return this.slimConversationDetail(raw);
+        const result = this.slimConversationDetail(raw);
+        this.setCached(cacheKey, result, this.convsTtl);
+        return result;
       }
       throw err;
     }
@@ -597,6 +646,7 @@ export class HomeExchangeApi {
       "api",
       { ids }
     );
+    this.invalidateCache("conv");
     return { success: true, conversationIds: ids, action: "archived", count: ids.length };
   }
 
@@ -636,10 +686,12 @@ export class HomeExchangeApi {
     content: string
   ): Promise<unknown> {
     await this.messageThrottle();
-    return this.post(`${API_BASE}/v1/messages`, "api", {
+    const result = await this.post(`${API_BASE}/v1/messages`, "api", {
       conversation: conversationId,
       content,
     });
+    this.invalidateCache("conv");
+    return result;
   }
 
   /**
@@ -737,6 +789,7 @@ export class HomeExchangeApi {
       if (conv) console.error(`[api] sendFirstMessage: conv keys=${Object.keys(conv).join(",")}, exchanges=${JSON.stringify((conv as any).exchanges ?? "none")}`);
       if (convId) {
         const conversion = await this.attemptReciprocalConversion(convId as number, senderHomeId);
+        this.invalidateCache("conv");
         return {
           ...result,
           _reciprocal_conversion: {
@@ -749,6 +802,7 @@ export class HomeExchangeApi {
       }
     }
 
+    this.invalidateCache("conv");
     return result;
   }
 
@@ -945,6 +999,7 @@ export class HomeExchangeApi {
       "api",
       {}
     );
+    this.invalidateCache("conv");
     return { success: true, conversationId, action: "archived" };
   }
 
@@ -955,16 +1010,19 @@ export class HomeExchangeApi {
       "api",
       {}
     );
+    this.invalidateCache("conv");
     return { success: true, conversationId, action: "unarchived" };
   }
 
   /** Mark a conversation as favorite. */
   async favoriteConversation(conversationId: number): Promise<unknown> {
-    return this.post(
+    const result = await this.post(
       `${API_BASE}/v1/conversations/${conversationId}/favorite`,
       "api",
       {}
     );
+    this.invalidateCache("conv");
+    return result;
   }
 
   /** Remove a conversation from favorites. */
@@ -979,11 +1037,13 @@ export class HomeExchangeApi {
 
   /** Pre-approve an exchange via BFF. */
   async preApproveExchange(conversationId: number): Promise<unknown> {
-    return this.post(
+    const result = await this.post(
       `${BFF_BASE}/exchange/${conversationId}/pre-approve`,
       "bff",
       {}
     );
+    this.invalidateCache("conv");
+    return result;
   }
 
   /**
@@ -1067,11 +1127,13 @@ export class HomeExchangeApi {
     conversationId: number,
     reason: string
   ): Promise<unknown> {
-    return this.post(
+    const result = await this.post(
       `${API_BASE}/v1/exchanges/${conversationId}/cancel`,
       "api",
       { reason }
     );
+    this.invalidateCache("conv");
+    return result;
   }
 
   // ─── Write (Ratings) ────────────────────────────────────────────────────
@@ -1091,6 +1153,27 @@ export class HomeExchangeApi {
       "api",
       rating
     );
+  }
+
+  // ─── Cache helpers ─────────────────────────────────────────────────────────
+
+  private getCached<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (entry && entry.expiresAt > Date.now()) return entry.data as T;
+    this.cache.delete(key);
+    return null;
+  }
+
+  private setCached(key: string, data: unknown, ttlMs: number): void {
+    this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  }
+
+  /** Invalidate cache entries whose key contains `pattern` (or all entries if omitted). */
+  invalidateCache(pattern?: string): void {
+    if (!pattern) { this.cache.clear(); return; }
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) this.cache.delete(key);
+    }
   }
 
   // ─── HTTP helpers ──────────────────────────────────────────────────────────

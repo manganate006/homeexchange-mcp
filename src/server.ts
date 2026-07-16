@@ -22,6 +22,9 @@ const ConversationsSchema = z.object({
     .default("ALL"),
   first: z.coerce.number().int().min(1).max(50).default(10),
   after: z.coerce.number().int().min(0).default(0),
+  fields: z
+    .array(z.enum(["exchanges", "last_message", "stats", "meta"]))
+    .default([]),
 });
 const SendMessageSchema = z.object({
   conversationId: z.coerce.number().int().positive(),
@@ -212,6 +215,15 @@ const TOOLS = [
         after: {
           type: "number",
           description: "Pagination cursor offset (default: 0)",
+        },
+        fields: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["exchanges", "last_message", "stats", "meta"],
+          },
+          description:
+            'Field groups to include per conversation (default: all). Use ["exchanges"] to only get id + exchange dates/type/status — ideal when filtering by date or exchange type across many pages.',
         },
       },
     },
@@ -856,8 +868,8 @@ export function createServer(
           return textResult(data);
         }
         case "he_get_conversations": {
-          const { filter, first, after } = ConversationsSchema.parse(args);
-          const data = await api.getConversations(filter, first, after);
+          const { filter, first, after, fields } = ConversationsSchema.parse(args);
+          const data = await api.getConversations(filter, first, after, fields);
           return textResult(data);
         }
         case "he_get_messages": {
