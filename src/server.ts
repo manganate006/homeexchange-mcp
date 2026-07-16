@@ -10,6 +10,14 @@ import { HomeExchangeApi } from "./api.js";
 // ─── Zod schemas ─────────────────────────────────────────────────────────────
 
 const HomeIdSchema = z.object({ homeId: z.coerce.number().int().positive() });
+const GetHomeSchema = z.object({
+  homeId: z.coerce.number().int().positive(),
+  locale: z.string().min(2).max(5).optional(),
+});
+const HomeDescriptionsSchema = z.object({
+  homeId: z.coerce.number().int().positive(),
+  locales: z.array(z.string().min(2).max(5)).default(["fr", "en"]),
+});
 const ConversationIdSchema = z.object({
   conversationId: z.coerce.number().int().positive(),
 });
@@ -148,10 +156,34 @@ const TOOLS = [
   {
     name: "he_get_home",
     description:
-      "Get full details of a HomeExchange property (name, location, GPS, features, photos, owner info, descriptions, amenities)",
+      "Get full details of a HomeExchange property (name, location, GPS, features, photos, owner info, descriptions, amenities). Descriptions include every language the owner wrote; pass locale to keep only one and save tokens.",
     inputSchema: {
       type: "object" as const,
-      properties: { homeId: { type: "number", description: "HomeExchange property ID" } },
+      properties: {
+        homeId: { type: "number", description: "HomeExchange property ID" },
+        locale: {
+          type: "string",
+          description:
+            'Language code to filter descriptions (e.g. "fr", "en") — the entry is flagged is_fallback:true if that language has no translation. Omit to get all languages.',
+        },
+      },
+      required: ["homeId"],
+    },
+  },
+  {
+    name: "he_get_home_descriptions",
+    description:
+      "Get a property's description texts by language, compact (title, good_feature, good_place, other per locale). Flags is_fallback when a requested language has no translation. Single API call — cheaper than he_get_home for comparing languages.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        homeId: { type: "number", description: "HomeExchange property ID" },
+        locales: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Language codes to return (default: ["fr", "en"])',
+        },
+      },
       required: ["homeId"],
     },
   },
@@ -636,7 +668,7 @@ Full example with all filter categories:
   {
     name: "he_update_description",
     description:
-      "Update property description texts (title, good_feature, good_place, other). IMPORTANT: ask user confirmation.",
+      "Update property description texts (title, good_feature, good_place, other). Omitted fields are preserved: current values of the target locale are merged in before the PUT. Use locale to create or update a specific language version. IMPORTANT: ask user confirmation.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -844,8 +876,13 @@ export function createServer(
       switch (name) {
         // ── Read ──────────────────────────────────────────────────────
         case "he_get_home": {
-          const { homeId } = HomeIdSchema.parse(args);
-          const data = await api.getHome(homeId);
+          const { homeId, locale } = GetHomeSchema.parse(args);
+          const data = await api.getHome(homeId, locale);
+          return textResult(data);
+        }
+        case "he_get_home_descriptions": {
+          const { homeId, locales } = HomeDescriptionsSchema.parse(args);
+          const data = await api.getHomeDescriptions(homeId, locales);
           return textResult(data);
         }
         case "he_get_calendar": {

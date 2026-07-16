@@ -37,9 +37,65 @@ export class HomeExchangeApi {
 
   // ─── Read ──────────────────────────────────────────────────────────────────
 
-  /** Get full property details from BFF. */
-  async getHome(homeId: number): Promise<HomeData> {
-    return this.get(`${BFF_BASE}/v1/homes/${homeId}`, "bff");
+  /**
+   * Get full property details from BFF.
+   * The API returns every description the owner wrote (one entry per locale,
+   * regardless of accept-language). When `locale` is set, descriptions are
+   * filtered client-side to that single language; if it doesn't exist the
+   * first entry (fr preferred) is returned flagged `is_fallback: true`.
+   */
+  async getHome(homeId: number, locale?: string): Promise<HomeData> {
+    const home = await this.get<HomeData>(`${BFF_BASE}/v1/homes/${homeId}`, "bff");
+    if (!locale || !Array.isArray(home.descriptions)) return home;
+
+    const available = home.descriptions
+      .map((d) => d.locale)
+      .filter((l): l is string => typeof l === "string");
+    const match = home.descriptions.find((d) => d.locale === locale);
+    const fallback =
+      home.descriptions.find((d) => d.locale === "fr") ?? home.descriptions[0];
+
+    return {
+      ...home,
+      available_locales: available,
+      descriptions: match
+        ? [match]
+        : fallback
+          ? [{ ...fallback, is_fallback: true, requested_locale: locale }]
+          : [],
+    };
+  }
+
+  /**
+   * Get a property's description texts grouped by language, compact.
+   * Single GET — the home payload already contains every locale.
+   */
+  async getHomeDescriptions(
+    homeId: number,
+    locales: string[] = ["fr", "en"]
+  ): Promise<unknown> {
+    const home = await this.getHome(homeId);
+    const all = Array.isArray(home.descriptions) ? home.descriptions : [];
+    const available = all
+      .map((d) => d.locale)
+      .filter((l): l is string => typeof l === "string");
+    const fallback = all.find((d) => d.locale === "fr") ?? all[0];
+
+    const descriptions: Record<string, unknown> = {};
+    for (const locale of locales) {
+      const entry = all.find((d) => d.locale === locale) ?? fallback;
+      if (!entry) continue;
+      descriptions[locale] = {
+        title: entry.title,
+        good_feature: entry.good_feature,
+        good_place: entry.good_place,
+        other: entry.other,
+        ...(entry.locale !== locale
+          ? { is_fallback: true, fallback_locale: entry.locale }
+          : {}),
+      };
+    }
+    return { homeId, available_locales: available, descriptions };
   }
 
   /** Get property availability calendar. */
@@ -948,8 +1004,16 @@ export class HomeExchangeApi {
 
   /**
    * Update home description.
-   * Endpoint: PUT https://bff.homeexchange.com/v1/homes/{homeId}/descriptions
-   * Body: description fields
+   * Endpoint: PATCH https://bff.homeexchange.com/v1/homes/{homeId}
+   * (the documented PUT /v1/homes/{homeId}/descriptions returns 404 "Cannot
+   * PUT" — the web app patches the home with a `descriptions` array instead).
+   *
+   * Merge before write: the current descriptions of every locale are fetched
+   * first, the target locale's entry is updated field-by-field (omitted
+   * fields keep their current value) and the FULL array is sent back, so a
+   * partial update can never blank out other sections or other languages.
+   * When no description exists yet for that locale, a new entry is appended
+   * (creates the translation).
    */
   async updateHomeDescription(
     homeId: number,
@@ -961,11 +1025,33 @@ export class HomeExchangeApi {
       locale?: string;
     }
   ): Promise<unknown> {
-    return this.put(
-      `${BFF_BASE}/v1/homes/${homeId}/descriptions`,
-      "bff",
-      description
-    );
+    const locale = description.locale ?? "fr";
+    const home = await this.getHome(homeId);
+    const all = Array.isArray(home.descriptions) ? home.descriptions : [];
+    const current = all.find((d) => d.locale === locale);
+
+    const merged = {
+      locale,
+      title: description.title ?? current?.title,
+      good_feature: description.good_feature ?? current?.good_feature,
+      good_place: description.good_place ?? current?.good_place,
+      other: description.other ?? current?.other,
+    };
+    const descriptions = [
+      ...all
+        .filter((d) => d.locale !== locale)
+        .map((d) => ({
+          locale: d.locale,
+          title: d.title,
+          good_feature: d.good_feature,
+          good_place: d.good_place,
+          other: d.other,
+        })),
+      merged,
+    ];
+
+    await this.patch(`${BFF_BASE}/v1/homes/${homeId}`, "bff", { descriptions });
+    return { success: true, homeId, locale, updated: merged };
   }
 
   // ─── Write (Favorites) ────────────────────────────────────────────────────
@@ -1252,7 +1338,7 @@ export class HomeExchangeApi {
     if (res.status === 401 && !retried) {
       console.error("[api] 401 — re-authenticating...");
       this.auth.invalidate();
-      return this.request(method, url, server, body, true);
+      return this.request(method, url, server, body, true, extraHeaders);
     }
 
     // Handle 429 — backoff
@@ -1260,7 +1346,7 @@ export class HomeExchangeApi {
       const retryAfter = parseInt(res.headers.get("retry-after") || "3", 10);
       console.error(`[api] 429 — waiting ${retryAfter}s...`);
       await sleep(retryAfter * 1000);
-      return this.request(method, url, server, body, retried);
+      return this.request(method, url, server, body, retried, extraHeaders);
     }
 
     if (!res.ok) {

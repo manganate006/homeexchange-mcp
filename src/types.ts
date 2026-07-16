@@ -37,6 +37,8 @@ export interface HomeData {
   descriptions: HomeDescription[];
   images: HomeImage[];
   tag?: { is_location_interested?: boolean };
+  /** Added client-side when `getHome` is called with a locale filter. */
+  available_locales?: string[];
 }
 
 export interface HomeUser {
@@ -71,11 +73,15 @@ export interface HomeFeatures {
 }
 
 export interface HomeDescription {
+  locale?: string;
   title?: string;
   translated_title?: string;
   good_feature?: string;
   good_place?: string;
   other?: string;
+  /** Set when a requested locale has no translation and another one was returned instead. */
+  is_fallback?: boolean;
+  requested_locale?: string;
 }
 
 export interface HomeImage {

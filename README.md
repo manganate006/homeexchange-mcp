@@ -21,7 +21,7 @@ Browse properties, manage conversations, update your calendar, handle favorites 
 
 ## ✨ Features
 
-- **51 MCP tools** covering read and write operations
+- **52 MCP tools** covering read and write operations
 - 🔍 **Property search** with advanced filters: bounding box, dates, bedrooms, amenities, pool...
 - 💬 **Messaging**: read conversations, send messages, first contact with owners
 - 📅 **Calendar management**: mark periods as available / unavailable / maybe
@@ -124,13 +124,14 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 
 ---
 
-## 🛠️ Tools (51)
+## 🛠️ Tools (52)
 
-### 🏠 Properties (5)
+### 🏠 Properties (6)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `he_get_home` | `homeId` | Full property details: location, features, photos, owner, descriptions |
+| `he_get_home` | `homeId`, `locale?` | Full property details: location, features, photos, owner, descriptions. `locale` keeps a single description language (flagged `is_fallback` if missing) |
+| `he_get_home_descriptions` | `homeId`, `locales?` | Description texts by language, compact (default `["fr", "en"]`); flags `is_fallback` when a language has no translation |
 | `he_get_calendar` | `homeId` | Availability calendar (available / unavailable / maybe periods) |
 | `he_get_calendar_batch` | `homeIds[]` | Calendars for multiple homes in one call (max 20) |
 | `he_get_ratings` | `homeId` | Property reviews: cleanliness, expectations, communication, feedback |
@@ -197,7 +198,7 @@ The token is valid for **~24 hours**. It is cached at `~/.homeexchange-mcp-token
 |------|-----------|-------------|
 | `he_update_calendar` | `homeId`, `periods[]` | Set periods: `status` 1=available, 2=unavailable, 3=maybe |
 | `he_update_home` | `homeId`, `fields` | Update property details (capacity, min nights, features…) |
-| `he_update_description` | `homeId`, `title?`, `good_feature?`, `good_place?`, `other?` | Update property description texts |
+| `he_update_description` | `homeId`, `title?`, `good_feature?`, `good_place?`, `other?`, `locale?` | Update property description texts. Omitted fields are preserved (merged from the current values of the target locale); `locale` creates/updates a language version |
 
 ### Write — Favorites (2)
 
@@ -300,7 +301,7 @@ Switch exchange in conversation 11111 to reciprocal
 ```
 src/
 ├── index.ts    — Entry point, StdioServerTransport, env validation
-├── server.ts   — 51 MCP tool definitions + request dispatch
+├── server.ts   — 52 MCP tool definitions + request dispatch
 ├── api.ts      — HTTP client (BFF + Main API, rate limiting, retries)
 ├── auth.ts     — Token management, browser cookie parsing, disk cache
 └── types.ts    — TypeScript interfaces
@@ -361,7 +362,7 @@ Parcourez des propriétés, gérez vos conversations, mettez à jour votre calen
 
 ## ✨ Fonctionnalités
 
-- **51 outils MCP** couvrant les opérations de lecture et d'écriture
+- **52 outils MCP** couvrant les opérations de lecture et d'écriture
 - 🔍 **Recherche de propriétés** avec filtres avancés : zone géographique, dates, chambres, équipements, piscine...
 - 💬 **Messagerie** : lire les conversations, envoyer des messages, premier contact avec des propriétaires
 - 📅 **Gestion du calendrier** : marquer des périodes comme disponible / indisponible / peut-être
@@ -464,13 +465,14 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 
 ---
 
-## 🛠️ Outils (51)
+## 🛠️ Outils (52)
 
-### 🏠 Propriétés (5)
+### 🏠 Propriétés (6)
 
 | Outil | Paramètres | Description |
 |-------|-----------|-------------|
-| `he_get_home` | `homeId` | Détails complets : localisation, équipements, photos, propriétaire, descriptions |
+| `he_get_home` | `homeId`, `locale?` | Détails complets : localisation, équipements, photos, propriétaire, descriptions. `locale` ne garde qu'une langue de description (marquée `is_fallback` si absente) |
+| `he_get_home_descriptions` | `homeId`, `locales?` | Textes de description par langue, format compact (défaut `["fr", "en"]`) ; signale `is_fallback` quand une langue n'a pas de traduction |
 | `he_get_calendar` | `homeId` | Calendrier de disponibilité (disponible / indisponible / peut-être) |
 | `he_get_calendar_batch` | `homeIds[]` | Calendriers de plusieurs propriétés en un seul appel (max 20) |
 | `he_get_ratings` | `homeId` | Avis : propreté, conformité aux attentes, communication, retours texte |
@@ -537,7 +539,7 @@ Le token est valable **~24 heures**. Il est mis en cache dans `~/.homeexchange-m
 |-------|-----------|-------------|
 | `he_update_calendar` | `homeId`, `periods[]` | Modifier les disponibilités : `status` 1=disponible, 2=indisponible, 3=peut-être |
 | `he_update_home` | `homeId`, `fields` | Modifier les détails de la propriété (capacité, nuits minimum, équipements…) |
-| `he_update_description` | `homeId`, `title?`, `good_feature?`, `good_place?`, `other?` | Modifier les textes de description |
+| `he_update_description` | `homeId`, `title?`, `good_feature?`, `good_place?`, `other?`, `locale?` | Modifier les textes de description. Les champs omis sont préservés (fusionnés depuis les valeurs actuelles de la locale cible) ; `locale` crée/met à jour une version linguistique |
 
 ### Écriture — Favoris (2)
 
@@ -640,7 +642,7 @@ Passe l'échange de la conversation 11111 en réciproque
 ```
 src/
 ├── index.ts    — Point d'entrée, StdioServerTransport, validation des env vars
-├── server.ts   — Définition des 51 outils MCP + dispatch des requêtes
+├── server.ts   — Définition des 52 outils MCP + dispatch des requêtes
 ├── api.ts      — Client HTTP (BFF + API principale, rate limiting, retries)
 ├── auth.ts     — Gestion des tokens, parsing des cookies navigateur, cache disque
 └── types.ts    — Interfaces TypeScript
