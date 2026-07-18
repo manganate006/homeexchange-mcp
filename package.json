@@ -4,6 +4,7 @@
   "description": "MCP server for HomeExchange — browse properties, manage calendar, send messages",
   "type": "module",
   "main": "dist/index.js",
+  "license": "MIT",
   "bin": {
     "homeexchange-mcp": "./bin/homeexchange-mcp"
   },
